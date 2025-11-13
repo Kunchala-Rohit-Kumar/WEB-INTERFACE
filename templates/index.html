@@ -1,0 +1,156 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Aussie Property Dashboard</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <style>body{background:#f7f8fa}.card{border-radius:10px}</style>
+</head>
+<body>
+  <div class="container py-4">
+    <h1 class="text-center mb-4">🏠 Aussie Property Dashboard</h1>
+
+    <form id="form" class="row g-2 align-items-center mb-3">
+      <div class="col">
+        <input name="suburb" class="form-control" placeholder="Enter suburb (e.g. Belmont North)" value="Belmont North">
+      </div>
+      <div class="col-auto">
+        <button class="btn btn-primary">Search</button>
+      </div>
+      <div class="col-auto">
+        <button id="downloadBtn" type="button" class="btn btn-outline-secondary" disabled>Download CSV</button>
+      </div>
+    </form>
+
+    <div id="summaryArea" class="mb-3"></div>
+
+    <div class="card mb-3 p-3">
+      <canvas id="priceChart" height="80"></canvas>
+    </div>
+
+    <div id="map" style="height:420px" class="mb-3 border"></div>
+
+    <table class="table table-hover bg-white">
+      <thead class="table-secondary">
+        <tr><th>Address</th><th>Beds</th><th>Baths</th><th>Land</th><th>Price</th><th>$/m²</th></tr>
+      </thead>
+      <tbody id="tableBody"></tbody>
+    </table>
+
+    <div id="error" class="text-danger mt-2"></div>
+  </div>
+
+<script>
+let map, markers = [], chart=null, currentCSV = null;
+
+function priceColor(price, median) {
+  if (!price || !median) return 'gray';
+  const pct = price / median;
+  if (pct < 0.8) return 'green';
+  if (pct < 1.2) return 'orange';
+  return 'red';
+}
+
+document.getElementById("form").onsubmit = async (e) => {
+  e.preventDefault();
+  document.getElementById("error").textContent = "";
+  const form = new FormData(e.target);
+  const res = await fetch("/get_properties", { method:'POST', body:form });
+  if (!res.ok) {
+    const err = await res.json();
+    document.getElementById("error").textContent = err.error || 'Request failed';
+    return;
+  }
+  const data = await res.json();
+  currentCSV = data.csv || null;
+  document.getElementById("downloadBtn").disabled = !currentCSV;
+
+  // Summary
+  document.getElementById("summaryArea").innerHTML = `
+    <div class="alert alert-info">
+      <b>Avg price:</b> ${data.summary.avg_price} |
+      <b>Avg beds:</b> ${data.summary.avg_beds} |
+      <b>Avg land:</b> ${data.summary.avg_land}
+    </div>`;
+
+  // Table
+  const tbody = document.getElementById("tableBody");
+  tbody.innerHTML = "";
+  const prices = data.properties.map(p=>p.price).filter(p=>p!=null);
+  const median = prices.length ? prices.sort((a,b)=>a-b)[Math.floor(prices.length/2)] : null;
+
+  data.properties.forEach(p=>{
+    const priceFmt = p.price ? p.price.toLocaleString() : '-';
+    const ppsqm = p.price_per_sqm ? p.price_per_sqm.toLocaleString() : '-';
+    tbody.innerHTML += `<tr>
+      <td>${p.address}</td>
+      <td>${p.bedrooms||'-'}</td>
+      <td>${p.bathrooms||'-'}</td>
+      <td>${p.land||'-'}</td>
+      <td>${priceFmt}</td>
+      <td>${ppsqm}</td>
+    </tr>`;
+  });
+
+  // Chart
+  const ctx = document.getElementById("priceChart").getContext('2d');
+  const labels = data.properties.map(p=>p.address);
+  const values = data.properties.map(p=>p.price || 0);
+  if (chart) chart.destroy();
+  chart = new Chart(ctx, {
+    type:'bar',
+    data:{labels:labels, datasets:[{label:'Price', data:values}]},
+    options:{plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}
+  });
+
+  // Map
+  if (!map) {
+    map = L.map('map').setView([ -33.015, 151.67 ], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',{maxZoom:19}).addTo(map);
+  }
+  markers.forEach(m=>m.remove()); markers=[];
+  data.properties.forEach(p=>{
+    if (p.latitude && p.longitude) {
+      // choose marker color by price relative to median
+      const col = priceColor(p.price, median);
+      const marker = L.circleMarker([p.latitude, p.longitude], {
+        radius:8, fillOpacity:0.9, color:col, fillColor:col
+      }).addTo(map)
+        .bindPopup(`<b>${p.address}</b><br>Price: ${p.price? p.price.toLocaleString():'N/A'}<br>$/m²: ${p.price_per_sqm||'N/A'}`);
+      markers.push(marker);
+    }
+  });
+
+  if (markers.length) {
+    const group = L.featureGroup(markers);
+    map.fitBounds(group.getBounds().pad(0.2));
+  }
+};
+
+// Download CSV
+document.getElementById("downloadBtn").onclick = async () => {
+  if (!currentCSV) return;
+  const form = new FormData();
+  form.append('csv', currentCSV);
+  const res = await fetch('/download_csv', {method:'POST', body:form});
+  if (!res.ok) {
+    alert('Download failed');
+    return;
+  }
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'properties.csv';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+};
+</script>
+</body>
+</html>
